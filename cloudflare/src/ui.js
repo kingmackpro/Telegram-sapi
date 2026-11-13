@@ -22,15 +22,12 @@ function safe(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 async function digest(buf){const h=await crypto.subtle.digest("SHA-256",buf);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,"0")).join("")}
 function uploadCard(file){const el=document.createElement("div");el.className="file";el.innerHTML='<div><div class="filename">'+safe(file.name)+'</div><div class="meta">'+fmt(file.size)+' · Queued</div><div class="progress"><i></i></div></div><div class="status">Waiting</div>';$("#uploads").prepend(el);return {el,bar:el.querySelector("i"),meta:el.querySelector(".meta"),state:el.querySelector(".status")}}
 async function fingerprint(file){
- const parts=[],size=file.size,unit=1024*1024;
- for(const start of [...new Set([0,Math.max(0,Math.floor(size/2)-unit/2),Math.max(0,size-unit)])]){
-  parts.push(new Uint8Array(await file.slice(start,Math.min(size,start+unit)).arrayBuffer()));
+ const hashes=[];
+ for(let offset=0;offset<file.size;offset+=CHUNK){
+  const part=await file.slice(offset,Math.min(file.size,offset+CHUNK)).arrayBuffer();
+  hashes.push(await digest(part));
  }
- const total=parts.reduce((n,p)=>n+p.length,0),all=new Uint8Array(total);let off=0;
- for(const p of parts){all.set(p,off);off+=p.length}
- const meta=new TextEncoder().encode(file.name+"|"+size+"|"+file.lastModified+"|");
- const joined=new Uint8Array(meta.length+all.length);joined.set(meta);joined.set(all,meta.length);
- return digest(joined.buffer);
+ return digest(new TextEncoder().encode(file.name+"|"+file.size+"|"+hashes.join("|")).buffer);
 }
 async function uploadOne(file,card){
  try{
