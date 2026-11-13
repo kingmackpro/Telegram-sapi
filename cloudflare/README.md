@@ -65,3 +65,26 @@ curl -X PUT "https://telegram-sapi.oprangerx.workers.dev/v1/files/FILE_ID/chunks
 ## Development
 
 The Worker source is `src/index.js`; D1 schema is `schema.sql`. The Node.js CLI in the repository remains a separate deployment mode.
+
+
+## Node.js client
+
+Node.js 20+ can split and transfer a local file through the Worker API:
+
+Linux/macOS:
+```sh
+export API_TOKEN="YOUR_WORKER_API_TOKEN"
+export CLOUDFLARE_WORKER_URL="https://telegram-sapi.oprangerx.workers.dev"
+node cloudflare/client.js upload ./large-file.zip
+node cloudflare/client.js status f_FILE_ID
+node cloudflare/client.js download f_FILE_ID ./restored-file.zip
+```
+
+Windows PowerShell:
+```powershell
+$env:API_TOKEN = "YOUR_WORKER_API_TOKEN"
+$env:CLOUDFLARE_WORKER_URL = "https://telegram-sapi.oprangerx.workers.dev"
+node cloudflare/client.js upload .\large-file.zip
+```
+
+The client reads and uploads one 10 MiB chunk at a time, so it does not load the entire source file into memory. It verifies each downloaded chunk and the reconstructed file hash.
