@@ -122,6 +122,20 @@ export default {
             typeof body.fingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(body.fingerprint)) {
           return json({ error: "Expected filename, non-negative integer size, and 64-character fingerprint" }, 400);
         }
+        const recovered = await env.DB.prepare("SELECT id,filename,size_bytes,chunk_size,total_chunks,sha256,status,created_at,updated_at FROM recovery_files WHERE fingerprint=? AND size_bytes=? AND filename=? AND status='complete' ORDER BY archived_at DESC LIMIT 1").bind(body.fingerprint, body.size, body.filename).first();
+        if (recovered) {
+          const recoveryChunks = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status='uploaded' AND telegram_file_id IS NOT NULL THEN 1 ELSE 0 END) AS uploaded FROM recovery_chunks WHERE file_id=?").bind(recovered.id).first();
+          if (recoveryChunks.total === recovered.total_chunks && recoveryChunks.uploaded === recovered.total_chunks) {
+            await env.DB.batch([
+              env.DB.prepare("INSERT INTO files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status,fingerprint,expires_at,created_at,updated_at) SELECT id,filename,size_bytes,chunk_size,total_chunks,sha256,'complete',fingerprint,NULL,created_at,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM recovery_files WHERE id=?").bind(recovered.id),
+              env.DB.prepare("INSERT INTO chunks (file_id,chunk_index,size_bytes,sha256,telegram_message_id,telegram_file_id,status,error,updated_at) SELECT file_id,chunk_index,size_bytes,sha256,telegram_message_id,telegram_file_id,status,error,updated_at FROM recovery_chunks WHERE file_id=?").bind(recovered.id),
+              env.DB.prepare("DELETE FROM recovery_chunks WHERE file_id=?").bind(recovered.id),
+              env.DB.prepare("DELETE FROM recovery_files WHERE id=?").bind(recovered.id)
+            ]);
+            const chunks = await env.DB.prepare("SELECT chunk_index,status,sha256 FROM chunks WHERE file_id=? ORDER BY chunk_index").bind(recovered.id).all();
+            return json({ id: recovered.id, filename: recovered.filename, size_bytes: recovered.size_bytes, chunk_size: recovered.chunk_size, total_chunks: recovered.total_chunks, status: 'complete', recovered: true, resumed: false, chunks: chunks.results }, 200);
+          }
+        }
         const existing = await env.DB.prepare("SELECT id FROM files WHERE fingerprint=? AND size_bytes=? AND status='uploading' AND expires_at>datetime('now') ORDER BY updated_at DESC LIMIT 1").bind(body.fingerprint, body.size).first();
         if (existing) {
           await env.DB.prepare("UPDATE files SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),expires_at=datetime('now','+24 hours') WHERE id=?").bind(existing.id).run();
@@ -148,11 +162,19 @@ export default {
         if (!deleteId || deleteId.includes("/")) return json({ error: "Not found" }, 404);
         const existing = await env.DB.prepare("SELECT id FROM files WHERE id=?").bind(deleteId).first();
         if (!existing) return json({ error: "File not found" }, 404);
-        // Remove only D1 metadata. Telegram messages/documents are intentionally left untouched.
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM chunks WHERE file_id=?").bind(deleteId),
-          env.DB.prepare("DELETE FROM files WHERE id=?").bind(deleteId)
-        ]);
+        // Archive completed-file metadata and Telegram references for instant recovery.
+        const file = await env.DB.prepare("SELECT * FROM files WHERE id=?").bind(deleteId).first();
+        if (file.status === 'complete' && file.fingerprint) {
+          await env.DB.batch([
+            env.DB.prepare("INSERT OR REPLACE INTO recovery_files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status,fingerprint,created_at,updated_at,archived_at) VALUES (?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))").bind(file.id,file.filename,file.size_bytes,file.chunk_size,file.total_chunks,file.sha256,file.status,file.fingerprint,file.created_at,file.updated_at),
+            env.DB.prepare("DELETE FROM recovery_chunks WHERE file_id=?").bind(deleteId),
+            env.DB.prepare("INSERT INTO recovery_chunks (file_id,chunk_index,size_bytes,sha256,telegram_message_id,telegram_file_id,status,error,updated_at) SELECT file_id,chunk_index,size_bytes,sha256,telegram_message_id,telegram_file_id,status,error,updated_at FROM chunks WHERE file_id=?").bind(deleteId),
+            env.DB.prepare("DELETE FROM chunks WHERE file_id=?").bind(deleteId),
+            env.DB.prepare("DELETE FROM files WHERE id=?").bind(deleteId)
+          ]);
+        } else {
+          await env.DB.batch([env.DB.prepare("DELETE FROM chunks WHERE file_id=?").bind(deleteId),env.DB.prepare("DELETE FROM files WHERE id=?").bind(deleteId)]);
+        }
         return json({ id: deleteId, deleted: true, storage: "database_only", telegramDeleted: false });
       }
       const finalizePrefix = "/v1/files/";
