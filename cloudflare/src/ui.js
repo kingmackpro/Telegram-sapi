@@ -48,7 +48,7 @@ async function uploadOne(file,card){
     try{
      const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));
      await api("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob});
-     completed++;card.bar.style.width=(completed/Math.max(1,m.total_chunks)*100)+"%";
+     completed++;card.bar.style.width=(completed/Math.max(1,totalChunks)*100)+"%";
      card.state.textContent="Uploaded "+completed+"/"+totalChunks+" chunks · 3-way parallel";
     }catch(e){failed.push(i);card.state.textContent="Chunk "+(i+1)+" failed: "+e.message}
    }
@@ -82,9 +82,12 @@ async function downloadFile(id,button){
  try{
   const m=await api("/v1/files/"+id).then(r=>r.json());
   if(m.status!=="complete")throw Error("File is not complete");
-  const parts=new Array(m.total_chunks);let completed=0,cursor=0;
-  const workers=Array.from({length:Math.min(4,m.total_chunks)},async()=>{
-   while(cursor<m.total_chunks){
+  const totalChunks=m.total_chunks??m.totalChunks;
+  if(!Number.isSafeInteger(totalChunks)||totalChunks<0)throw Error("Server returned an invalid chunk count");
+  if(!Array.isArray(m.chunks)||m.chunks.length!==totalChunks)throw Error("Server returned incomplete chunk metadata");
+  const parts=new Array(totalChunks);let completed=0,cursor=0;
+  const workers=Array.from({length:Math.min(4,totalChunks)},async()=>{
+   while(cursor<totalChunks){
     const i=cursor++;
     const r=await api("/v1/files/"+id+"/chunks/"+i);
     const b=await r.arrayBuffer();
