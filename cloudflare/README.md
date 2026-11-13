@@ -113,11 +113,10 @@ Do not create a second D1 database or change the database ID. Worker secrets
 (`API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) are managed in the
 Worker's **Settings → Variables and Secrets** and are not stored in Git.
 
-Cloudflare requires its GitHub App authorization and a Workers Builds token
-before the native build configuration can be activated. Those are account
-authorization steps in the Cloudflare dashboard; this repository is prepared
-for them, but the connection is not claimed active until Cloudflare reports a
-successful build configuration.
+The GitHub repository, production branch, root directory, build command,
+deploy command, and Workers Builds token are configured in the Cloudflare
+dashboard. The first build must complete successfully before automatic
+production deployments are considered verified.
 
 ### Updating the Worker
 
