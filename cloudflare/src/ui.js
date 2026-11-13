@@ -32,7 +32,7 @@ function fmtTime(seconds){if(!Number.isFinite(seconds)||seconds<0)return "—";i
 function transferStats(bytes,total,start){const elapsed=Math.max(.25,(performance.now()-start)/1000),speed=bytes/elapsed;return {speed,eta:speed>0?(total-bytes)/speed:Infinity,elapsed}}
 function safe(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function digest(buf){const h=await crypto.subtle.digest("SHA-256",buf);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,"0")).join("")}
-function uploadCard(file){const el=document.createElement("article");el.className="transfer-card";el.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(file.name)+'</div><div class="status">Queued</div></div><div class="meta">'+fmt(file.size)+' total</div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Waiting to start</span><span class="meta" data-bytes>0 B / '+fmt(file.size)+'</span></div>';$("#uploads").prepend(el);return {el,bar:el.querySelector(".progress i"),meta:el.querySelector(".meta"),state:el.querySelector(".status"),speed:el.querySelector("[data-speed]"),eta:el.querySelector("[data-eta]"),done:el.querySelector("[data-done]"),detail:el.querySelector("[data-detail]"),bytes:el.querySelector("[data-bytes]")}}
+function uploadCard(file){const key="upload:"+file.name+"|"+file.size;let el=[...$("#uploads").querySelectorAll(".transfer-card")].find(x=>x.dataset.transferKey===key);if(!el){el=document.createElement("article");el.className="transfer-card";el.dataset.transferKey=key;$("#uploads").prepend(el)}el.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(file.name)+'</div><div class="status">Queued</div></div><div class="meta">'+fmt(file.size)+' total</div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Waiting to start</span><span class="meta" data-bytes>0 B / '+fmt(file.size)+'</span></div>';$("#uploads").prepend(el);return {el,bar:el.querySelector(".progress i"),meta:el.querySelector(".meta"),state:el.querySelector(".status"),speed:el.querySelector("[data-speed]"),eta:el.querySelector("[data-eta]"),done:el.querySelector("[data-done]"),detail:el.querySelector("[data-detail]"),bytes:el.querySelector("[data-bytes]")}}
 async function fingerprint(file){
  const hashes=[];
  for(let offset=0;offset<file.size;offset+=CHUNK){
@@ -50,12 +50,13 @@ async function uploadOne(file,card){
   const totalChunks=m.total_chunks??m.totalChunks;
   if(!Number.isSafeInteger(totalChunks)||totalChunks<0)throw Error("Server returned an invalid chunk count");
   const done=new Set((m.chunks||[]).filter(c=>c.status==="uploaded").map(c=>c.chunk_index));
+  if(m.recovered){card.bar.style.width="100%";card.done.textContent="100%";card.speed.textContent="—";card.eta.textContent="Instant";card.bytes.textContent=fmt(file.size)+" / "+fmt(file.size);card.detail.textContent="Restored from recovery archive · no bytes transferred";card.state.innerHTML='<span class="good">Recovered instantly</span>';toast("Recovered instantly: "+file.name);return}
   let completed=done.size,failed=[],sentBytes=0;
+  const todo=Array.from({length:totalChunks},(_,i)=>i).filter(i=>!done.has(i));
   const transferStart=performance.now(),uploadTotal=todo.reduce((sum,i)=>sum+Math.min(CHUNK,file.size-i*CHUNK),0);
   card.bar.style.width=(completed/Math.max(1,totalChunks)*100)+"%";
   card.done.textContent=Math.round(completed/Math.max(1,totalChunks)*100)+"%";
   card.detail.textContent="Preparing upload";
-  const todo=Array.from({length:totalChunks},(_,i)=>i).filter(i=>!done.has(i));
   let cursor=0;
   async function worker(){
    while(cursor<todo.length){
@@ -79,7 +80,7 @@ async function uploadOne(file,card){
    card.state.textContent="Verifying upload…";card.detail.textContent="Verifying uploaded chunks";
    const final=await api("/v1/files/"+m.id+"/complete",{method:"POST"}).then(r=>r.json());
    if(final.status!=="complete")throw Error("Server did not confirm upload completion");
-   card.state.innerHTML='<span class="good">Complete</span>';card.speed.textContent=m.recovered?"0 B/s":card.speed.textContent;card.eta.textContent="Done";card.done.textContent="100%";card.detail.textContent=m.recovered?"Restored from recovery archive":"Upload and integrity checks completed";card.bytes.textContent=fmt(file.size)+" / "+fmt(file.size);toast((m.recovered?"Recovered instantly: ":m.resumed?"Resumed: ":"Uploaded: ")+file.name)
+   card.state.innerHTML='<span class="good">Complete</span>';card.eta.textContent="Done";card.done.textContent="100%";card.detail.textContent="Upload and integrity checks completed";card.bytes.textContent=fmt(file.size)+" / "+fmt(file.size);toast((m.resumed?"Resumed: ":"Uploaded: ")+file.name)
   }
  }catch(e){card.state.innerHTML='<span class="bad">'+safe(e.message)+'</span>'}
  finally{loadFiles()}
@@ -98,7 +99,7 @@ async function deleteFile(id,button){
  }catch(e){toast(e.message);button.disabled=false;button.textContent=old}
 }
 async function downloadFile(id,button){
- const old=button.textContent;button.disabled=true;button.textContent="Preparing…";
+ const old=button.textContent;button.disabled=true;button.textContent="Preparing…";let card=null;
  try{
   const m=await api("/v1/files/"+id).then(r=>r.json());
   if(m.status!=="complete")throw Error("File is not complete");
@@ -107,7 +108,7 @@ async function downloadFile(id,button){
   if(!Array.isArray(m.chunks)||m.chunks.length!==totalChunks)throw Error("Server returned incomplete chunk metadata");
   const parts=new Array(totalChunks);let completed=0,cursor=0,receivedBytes=0;
   const downloadStart=performance.now(),downloadTotal=Number(m.size_bytes)||0;
-  const card=document.createElement("article");card.className="transfer-card";card.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(m.filename)+'</div><div class="status">Downloading</div></div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Starting download</span><span class="meta" data-bytes>0 B / '+fmt(downloadTotal)+'</span></div>';$("#uploads").prepend(card);
+  card=[...$("#uploads").querySelectorAll(".transfer-card")].find(x=>x.dataset.transferKey==="download:"+id);if(!card){card=document.createElement("article");card.className="transfer-card";card.dataset.transferKey="download:"+id;$("#uploads").prepend(card)}card.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(m.filename)+'</div><div class="status">Downloading</div></div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Starting download</span><span class="meta" data-bytes>0 B / '+fmt(downloadTotal)+'</span></div>';$("#uploads").prepend(card);
   const dbar=card.querySelector(".progress i"),dspeed=card.querySelector("[data-speed]"),deta=card.querySelector("[data-eta]"),ddone=card.querySelector("[data-done]"),ddetail=card.querySelector("[data-detail]"),dbytes=card.querySelector("[data-bytes]");
   const workers=Array.from({length:Math.min(4,totalChunks)},async()=>{
    while(cursor<totalChunks){
@@ -132,7 +133,7 @@ async function downloadFile(id,button){
   a.href=u;a.download=m.filename;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);
   dspeed.textContent=fmtSpeed(receivedBytes/Math.max(.25,(performance.now()-downloadStart)/1000));deta.textContent="Done";ddone.textContent="100%";dbar.style.width="100%";ddetail.textContent="Integrity verified · download ready";
   toast("Download ready");
- }catch(e){toast(e.message);const card=$("#uploads .transfer-card");if(card){const detail=card.querySelector("[data-detail]");if(detail)detail.textContent="Download failed: "+e.message}}
+ }catch(e){toast(e.message);if(card){const detail=card.querySelector("[data-detail]"),state=card.querySelector(".status");if(detail)detail.textContent="Download failed: "+e.message;if(state)state.innerHTML='<span class="bad">Failed</span>'}}
  finally{button.disabled=false;button.textContent=old}
 }
 $("#refresh").onclick=()=>loadFiles();$("#prev").onclick=()=>{page=Math.max(0,page-1);loadFiles()};$("#next").onclick=()=>{page++;loadFiles()};$("#search").oninput=()=>{query=$("#search").value.trim();page=0;clearTimeout(timer);timer=setTimeout(loadFiles,250)};$("#status").onchange=()=>{status=$("#status").value;page=0;loadFiles()};
