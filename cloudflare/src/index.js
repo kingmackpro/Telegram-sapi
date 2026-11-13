@@ -1,0 +1,130 @@
+const CHUNK_SIZE = 10 * 1024 * 1024;
+const TELEGRAM_API = "https://api.telegram.org";
+
+function json(data, status = 200) {
+  return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
+}
+function authorized(request, env) {
+  return Boolean(env.API_TOKEN) && request.headers.get("Authorization") === `Bearer ${env.API_TOKEN}`;
+}
+function hex(bytes) {
+  return [...new Uint8Array(bytes)].map(v => v.toString(16).padStart(2, "0")).join("");
+}
+async function sha256(buffer) {
+  return hex(await crypto.subtle.digest("SHA-256", buffer));
+}
+function fileId() { return "f_" + crypto.randomUUID().replaceAll("-", ""); }
+async function tg(env, method, body) {
+  const response = await fetch(`${TELEGRAM_API}/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, { method: "POST", body });
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    const error = new Error(data.description || `Telegram API HTTP ${response.status}`);
+    error.telegramRejected = true;
+    error.retryAfter = data.parameters?.retry_after;
+    throw error;
+  }
+  return data.result;
+}
+async function getFile(env, telegramFileId) {
+  const result = await tg(env, "getFile", JSON.stringify({ file_id: telegramFileId }));
+  const response = await fetch(`${TELEGRAM_API}/file/bot${env.TELEGRAM_BOT_TOKEN}/${result.file_path}`);
+  if (!response.ok) throw new Error(`Telegram file download HTTP ${response.status}`);
+  return response;
+}
+async function ensureConfig(env) {
+  if (!env.DB || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID || !env.API_TOKEN) {
+    throw new Error("Worker configuration incomplete: D1 binding and API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID secrets are required");
+  }
+}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return json({ ok: true, service: "telegram-sapi-worker", version: "0.2.0-cloudflare" });
+    }
+    if (!authorized(request, env)) return json({ error: "Unauthorized" }, 401);
+    try {
+      await ensureConfig(env);
+      if (request.method === "POST" && url.pathname === "/v1/files") {
+        const body = await request.json();
+        if (!body || typeof body.filename !== "string" || body.filename.length < 1 || body.filename.length > 255 ||
+            !Number.isSafeInteger(body.size) || body.size < 0 ||
+            (body.sha256 != null && !/^[a-f0-9]{64}$/i.test(body.sha256))) {
+          return json({ error: "Expected filename, non-negative integer size, and optional SHA-256" }, 400);
+        }
+        const id = fileId();
+        const total = Math.ceil(body.size / CHUNK_SIZE);
+        await env.DB.prepare("INSERT INTO files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status) VALUES (?,?,?,?,?,?,?)")
+          .bind(id, body.filename, body.size, CHUNK_SIZE, total, body.sha256 || null, total === 0 ? "complete" : "uploading").run();
+        const stmts = [];
+        for (let i = 0; i < total; i++) {
+          const size = Math.min(CHUNK_SIZE, body.size - i * CHUNK_SIZE);
+          stmts.push(env.DB.prepare("INSERT INTO chunks (file_id,chunk_index,size_bytes,status) VALUES (?,?,?,'pending')").bind(id, i, size));
+        }
+        if (stmts.length) await env.DB.batch(stmts);
+        return json({ id, filename: body.filename, size: body.size, chunkSize: CHUNK_SIZE, totalChunks: total, status: total === 0 ? "complete" : "uploading" }, 201);
+      }
+      const match = url.pathname.match(/^\/v1\/files\/([a-zA-Z0-9_-]+)(?:\/chunks\/(\d+))?$/);
+      if (!match) return json({ error: "Not found" }, 404);
+      const id = match[1];
+      const indexText = match[2];
+      const file = await env.DB.prepare("SELECT * FROM files WHERE id=?").bind(id).first();
+      if (!file) return json({ error: "File not found" }, 404);
+      if (request.method === "GET" && indexText === undefined) {
+        const chunks = await env.DB.prepare("SELECT chunk_index,size_bytes,sha256,status,telegram_message_id FROM chunks WHERE file_id=? ORDER BY chunk_index").bind(id).all();
+        return json({ ...file, chunks: chunks.results });
+      }
+      if (indexText === undefined) return json({ error: "Chunk index required" }, 400);
+      const index = Number(indexText);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= file.total_chunks) return json({ error: "Invalid chunk index" }, 400);
+      const chunk = await env.DB.prepare("SELECT * FROM chunks WHERE file_id=? AND chunk_index=?").bind(id, index).first();
+      if (!chunk) return json({ error: "Chunk not found" }, 404);
+      if (request.method === "PUT") {
+        if (chunk.status === "uploaded") return json({ error: "Chunk already uploaded", sha256: chunk.sha256 }, 409);
+        if (chunk.status === "uncertain") return json({ error: "Chunk outcome is uncertain; reconcile before retrying" }, 409);
+        const bytes = await request.arrayBuffer();
+        if (bytes.byteLength !== chunk.size_bytes) return json({ error: "Chunk size mismatch", expected: chunk.size_bytes, received: bytes.byteLength }, 400);
+        const digest = await sha256(bytes);
+        await env.DB.prepare("UPDATE chunks SET status='uploading',sha256=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE file_id=? AND chunk_index=?")
+          .bind(digest, id, index).run();
+        const form = new FormData();
+        form.set("chat_id", env.TELEGRAM_CHAT_ID);
+        form.set("document", new Blob([bytes], { type: "application/octet-stream" }), `${id}.part${index}`);
+        let message;
+        try {
+          message = await tg(env, "sendDocument", form);
+        } catch (error) {
+          const state = error.telegramRejected ? "pending" : "uncertain";
+          await env.DB.prepare("UPDATE chunks SET status=?,error=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE file_id=? AND chunk_index=?")
+            .bind(state, error.message.slice(0, 500), id, index).run();
+          return json({ error: error.message, status: state, retryAfter: error.retryAfter || null }, error.telegramRejected ? 502 : 503);
+        }
+        const doc = message.document;
+        if (!doc?.file_id) {
+          await env.DB.prepare("UPDATE chunks SET status='uncertain',error='Telegram response missing document file_id' WHERE file_id=? AND chunk_index=?").bind(id, index).run();
+          return json({ error: "Telegram response incomplete; chunk marked uncertain" }, 503);
+        }
+        await env.DB.prepare("UPDATE chunks SET status='uploaded',telegram_message_id=?,telegram_file_id=?,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE file_id=? AND chunk_index=?")
+          .bind(message.message_id, doc.file_id, id, index).run();
+        const pending = await env.DB.prepare("SELECT COUNT(*) AS n FROM chunks WHERE file_id=? AND status!='uploaded'").bind(id).first();
+        if (pending.n === 0) {
+          await env.DB.prepare("UPDATE files SET status='complete',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").bind(id).run();
+        }
+        return json({ id, index, status: "uploaded", size: bytes.byteLength, sha256: digest, telegramMessageId: message.message_id });
+      }
+      if (request.method === "GET") {
+        if (chunk.status !== "uploaded" || !chunk.telegram_file_id) return json({ error: "Chunk is not available", status: chunk.status }, 409);
+        const response = await getFile(env, chunk.telegram_file_id);
+        const bytes = await response.arrayBuffer();
+        if (bytes.byteLength !== chunk.size_bytes || await sha256(bytes) !== chunk.sha256) {
+          return json({ error: "Downloaded chunk failed integrity verification" }, 502);
+        }
+        return new Response(bytes, { headers: { "Content-Type": "application/octet-stream", "Content-Length": String(bytes.byteLength), "X-Chunk-SHA256": chunk.sha256, "Cache-Control": "no-store" } });
+      }
+      return json({ error: "Method not allowed" }, 405);
+    } catch (error) {
+      console.error("telegram-sapi error", error);
+      return json({ error: error.message || "Internal error" }, 500);
+    }
+  }
+};
