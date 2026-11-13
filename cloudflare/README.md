@@ -88,3 +88,39 @@ node cloudflare/client.js upload .\large-file.zip
 ```
 
 The client reads and uploads one 10 MiB chunk at a time, so it does not load the entire source file into memory. It verifies each downloaded chunk and the reconstructed file hash.
+
+
+## GitHub-connected deployments (recommended)
+
+The Worker is prepared for Cloudflare Workers Builds. The GitHub repository is
+`kingmackpro/Telegram-sapi`, production branch `main`, and the Worker name
+in `wrangler.toml` matches the already deployed Worker.
+
+To finish the one-time GitHub authorization and connection:
+
+1. Open [Cloudflare Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages).
+2. Open **telegram-sapi → Settings → Builds → Connect**.
+3. Choose **GitHub**, authorize/install the Cloudflare GitHub App for
+   `kingmackpro/Telegram-sapi`, and select that repository.
+4. Set production branch to `main`.
+5. Set the project **Root directory** to `/cloudflare`.
+6. Set build command to `echo "No build step required"`.
+7. Set deploy command to `npx wrangler deploy`.
+8. Save the connection and push a commit to `main`.
+
+The `cloudflare/wrangler.toml` file binds the existing D1 database as `DB`.
+Do not create a second D1 database or change the database ID. Worker secrets
+(`API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) are managed in the
+Worker's **Settings → Variables and Secrets** and are not stored in Git.
+
+Cloudflare requires its GitHub App authorization and a Workers Builds token
+before the native build configuration can be activated. Those are account
+authorization steps in the Cloudflare dashboard; this repository is prepared
+for them, but the connection is not claimed active until Cloudflare reports a
+successful build configuration.
+
+### Updating the Worker
+
+After the connection is active, update `cloudflare/src/index.js`,
+`cloudflare/schema.sql`, or `cloudflare/wrangler.toml` and push to `main`.
+Cloudflare Workers Builds will deploy the production Worker automatically.
