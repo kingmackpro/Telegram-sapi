@@ -30,6 +30,7 @@ function fmt(n){if(n<1024)return n+" B";const u=["KB","MB","GB","TB"];let i=-1;d
 function fmtSpeed(n){return fmt(n)+"/s"}
 function fmtTime(seconds){if(!Number.isFinite(seconds)||seconds<0)return "—";if(seconds<60)return Math.ceil(seconds)+"s";if(seconds<3600)return Math.floor(seconds/60)+"m "+Math.ceil(seconds%60)+"s";return Math.floor(seconds/3600)+"h "+Math.floor(seconds%3600/60)+"m"}
 function transferStats(bytes,total,start){const elapsed=Math.max(.25,(performance.now()-start)/1000),speed=bytes/elapsed;return {speed,eta:speed>0?(total-bytes)/speed:Infinity,elapsed}}
+function liveTransferStats(samples,bytes,total,start){const now=performance.now();samples.push([now,bytes]);while(samples.length>2&&now-samples[0][0]>2500)samples.shift();const first=samples[0],span=(now-first[0])/1000;const liveSpeed=span>0?(bytes-first[1])/span:0;const average=bytes/Math.max(.25,(now-start)/1000);const speed=liveSpeed>0?liveSpeed:average;return {speed,eta:speed>0?(total-bytes)/speed:Infinity}}
 function safe(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function digest(buf){const h=await crypto.subtle.digest("SHA-256",buf);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,"0")).join("")}
 function uploadCard(file){const key="upload:"+file.name+"|"+file.size;let el=[...$("#uploads").querySelectorAll(".transfer-card")].find(x=>x.dataset.transferKey===key);if(!el){el=document.createElement("article");el.className="transfer-card";el.dataset.transferKey=key;$("#uploads").prepend(el)}el.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(file.name)+'</div><div class="status">Queued</div></div><div class="meta">'+fmt(file.size)+' total</div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Waiting to start</span><span class="meta" data-bytes>0 B / '+fmt(file.size)+'</span></div>';$("#uploads").prepend(el);return {el,bar:el.querySelector(".progress i"),meta:el.querySelector(".meta"),state:el.querySelector(".status"),speed:el.querySelector("[data-speed]"),eta:el.querySelector("[data-eta]"),done:el.querySelector("[data-done]"),detail:el.querySelector("[data-detail]"),bytes:el.querySelector("[data-bytes]")}}
@@ -107,23 +108,32 @@ async function downloadFile(id,button){
   if(!Number.isSafeInteger(totalChunks)||totalChunks<0)throw Error("Server returned an invalid chunk count");
   if(!Array.isArray(m.chunks)||m.chunks.length!==totalChunks)throw Error("Server returned incomplete chunk metadata");
   const parts=new Array(totalChunks);let completed=0,cursor=0,receivedBytes=0;
-  const downloadStart=performance.now(),downloadTotal=Number(m.size_bytes)||0;
+  const downloadStart=performance.now(),downloadTotal=Number(m.size_bytes)||0,downloadSamples=[];
   card=[...$("#uploads").querySelectorAll(".transfer-card")].find(x=>x.dataset.transferKey==="download:"+id);if(!card){card=document.createElement("article");card.className="transfer-card";card.dataset.transferKey="download:"+id;$("#uploads").prepend(card)}card.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(m.filename)+'</div><div class="status">Downloading</div></div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Starting download</span><span class="meta" data-bytes>0 B / '+fmt(downloadTotal)+'</span></div>';$("#uploads").prepend(card);
   const dbar=card.querySelector(".progress i"),dspeed=card.querySelector("[data-speed]"),deta=card.querySelector("[data-eta]"),ddone=card.querySelector("[data-done]"),ddetail=card.querySelector("[data-detail]"),dbytes=card.querySelector("[data-bytes]");
   const workers=Array.from({length:Math.min(4,totalChunks)},async()=>{
    while(cursor<totalChunks){
     const i=cursor++;
     const r=await api("/v1/files/"+id+"/chunks/"+i);
-    const b=await r.arrayBuffer();
-    const hash=await digest(b);
+    if(!r.body)throw Error("Streaming downloads are not supported by this browser");
+    const reader=r.body.getReader(),streamParts=[];let chunkBytes=0;
+    while(true){
+     const {done,value}=await reader.read();
+     if(done)break;
+     streamParts.push(value);chunkBytes+=value.byteLength;receivedBytes+=value.byteLength;
+     const stats=liveTransferStats(downloadSamples,receivedBytes,downloadTotal,downloadStart);
+     dspeed.textContent=fmtSpeed(stats.speed);deta.textContent=fmtTime(stats.eta);
+     ddone.textContent=Math.min(100,Math.round(receivedBytes/Math.max(1,downloadTotal)*100))+"%";
+     dbar.style.width=ddone.textContent;dbytes.textContent=fmt(receivedBytes)+" / "+fmt(downloadTotal);
+     ddetail.textContent="Receiving chunk "+(i+1)+"/"+totalChunks+" · "+fmt(chunkBytes)+" received";
+     button.textContent="Downloading "+ddone.textContent;
+    }
+    const b=new Uint8Array(chunkBytes);let offset=0;
+    for(const part of streamParts){b.set(part,offset);offset+=part.byteLength}
+    const hash=await digest(b.buffer);
     if(hash!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);
-    parts[i]=b;completed++;receivedBytes+=b.byteLength;
-    const stats=transferStats(receivedBytes,downloadTotal,downloadStart);
-    dspeed.textContent=fmtSpeed(stats.speed);deta.textContent=fmtTime(stats.eta);
-    ddone.textContent=Math.round(receivedBytes/Math.max(1,downloadTotal)*100)+"%";
-    dbar.style.width=ddone.textContent;dbytes.textContent=fmt(receivedBytes)+" / "+fmt(downloadTotal);
-    ddetail.textContent="Verified "+completed+"/"+totalChunks+" chunks · 4 parallel";
-    button.textContent="Downloading "+ddone.textContent;
+    parts[i]=b;completed++;
+    ddetail.textContent="Received and verified "+completed+"/"+totalChunks+" chunks";
    }
   });
   await Promise.all(workers);
