@@ -53,7 +53,12 @@ async function uploadOne(file,card){
   }
   await Promise.all(Array.from({length:Math.min(3,todo.length)},worker));
   if(failed.length){card.state.innerHTML='<span class="bad">'+failed.length+' chunks need retry. Select the same file again to resume.</span>'}
-  else{card.state.innerHTML='<span class="good">Complete</span>';toast((m.resumed?"Resumed ":"Uploaded ")+file.name)}
+  else{
+   card.state.textContent="Verifying upload…";
+   const final=await api("/v1/files/"+m.id+"/complete",{method:"POST"}).then(r=>r.json());
+   if(final.status!=="complete")throw Error("Server did not confirm upload completion");
+   card.state.innerHTML='<span class="good">Complete</span>';toast((m.resumed?"Resumed ":"Uploaded ")+file.name)
+  }
  }catch(e){card.state.innerHTML='<span class="bad">'+safe(e.message)+'</span>'}
  finally{loadFiles()}
 }
