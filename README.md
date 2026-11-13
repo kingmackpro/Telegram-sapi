@@ -160,6 +160,10 @@ This is a deliberate safety trade-off. Full automatic reconciliation would requi
 
 Do not use this experimental project as the only copy of important data. Keep independent backups.
 
+## Cloudflare Workers deployment
+
+A Cloudflare Workers adapter is available in [`cloudflare/`](./cloudflare/README.md). It uses Workers + D1 and stores chunk bytes in Telegram, without requiring a persistent local filesystem. The deployed API supports file manifests and per-chunk upload/download. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as encrypted Worker secrets before using file endpoints. See the Cloudflare guide for the API contract and recovery behavior.
+
 ## Roadmap
 
 - [x] 10 MiB chunk format
