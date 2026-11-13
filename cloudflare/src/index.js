@@ -142,9 +142,14 @@ export default {
         if (stmts.length) await env.DB.batch(stmts);
         return json({ id, filename: body.filename, size: body.size, chunkSize: CHUNK_SIZE, totalChunks: total, status: total === 0 ? "complete" : "uploading", resumed: false, chunks: [] }, 201);
       }
-      const finalizeMatch = url.pathname.match(/^\\/v1\\/files\\/([a-zA-Z0-9_-]+)\\/complete$/);
+      const finalizePrefix = "/v1/files/";
+      const finalizeSuffix = "/complete";
+      const finalizePath = url.pathname;
+      const finalizeMatch = finalizePath.startsWith(finalizePrefix) && finalizePath.endsWith(finalizeSuffix)
+        ? finalizePath.slice(finalizePrefix.length, -finalizeSuffix.length)
+        : "";
       if (request.method === "POST" && finalizeMatch) {
-        const id = finalizeMatch[1];
+        const id = finalizeMatch;
         const file = await env.DB.prepare("SELECT id,status,total_chunks FROM files WHERE id=?").bind(id).first();
         if (!file) return json({ error: "File not found" }, 404);
         const pending = await env.DB.prepare("SELECT COUNT(*) AS n FROM chunks WHERE file_id=? AND status!='uploaded'").bind(id).first();
