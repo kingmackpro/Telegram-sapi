@@ -1,0 +1,12 @@
+name = "telegram-sapi"
+main = "src/index.js"
+compatibility_date = "2026-11-13"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "telegram-sapi-db"
+database_id = "e7631229-9ad7-45c0-9683-3cd2fe74cc8a"
+
+[observability]
+enabled = true
