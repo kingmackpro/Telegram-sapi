@@ -21,7 +21,45 @@ function fmt(n){if(n<1024)return n+" B";const u=["KB","MB","GB","TB"];let i=-1;d
 function safe(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function digest(buf){const h=await crypto.subtle.digest("SHA-256",buf);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,"0")).join("")}
 function uploadCard(file){const el=document.createElement("div");el.className="file";el.innerHTML='<div><div class="filename">'+safe(file.name)+'</div><div class="meta">'+fmt(file.size)+' · Queued</div><div class="progress"><i></i></div></div><div class="status">Waiting</div>';$("#uploads").prepend(el);return {el,bar:el.querySelector("i"),meta:el.querySelector(".meta"),state:el.querySelector(".status")}}
-async function uploadOne(file,card){try{card.state.textContent="Hashing…";const m=await api("/v1/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file.name,size:file.size})}).then(r=>r.json());card.meta.textContent=fmt(file.size)+" · "+m.id;for(let i=0;i<m.totalChunks;i++){const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));card.state.textContent="Uploading "+(i+1)+"/"+m.totalChunks;await api("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob});card.bar.style.width=((i+1)/m.totalChunks*100)+"%"}card.state.innerHTML='<span class="good">Complete</span>';toast("Uploaded "+file.name)}catch(e){card.state.innerHTML='<span class="bad">'+safe(e.message)+'</span>'}finally{loadFiles()}}
+async function fingerprint(file){
+ const parts=[],size=file.size,unit=1024*1024;
+ for(const start of [...new Set([0,Math.max(0,Math.floor(size/2)-unit/2),Math.max(0,size-unit)])]){
+  parts.push(new Uint8Array(await file.slice(start,Math.min(size,start+unit)).arrayBuffer()));
+ }
+ const total=parts.reduce((n,p)=>n+p.length,0),all=new Uint8Array(total);let off=0;
+ for(const p of parts){all.set(p,off);off+=p.length}
+ const meta=new TextEncoder().encode(file.name+"|"+size+"|"+file.lastModified+"|");
+ const joined=new Uint8Array(meta.length+all.length);joined.set(meta);joined.set(all,meta.length);
+ return digest(joined.buffer);
+}
+async function uploadOne(file,card){
+ try{
+  card.state.textContent="Identifying file…";
+  const fp=await fingerprint(file);
+  const m=await api("/v1/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file.name,size:file.size,fingerprint:fp})}).then(r=>r.json());
+  card.meta.textContent=fmt(file.size)+" · "+(m.resumed?"Resuming ":"")+m.id;
+  const done=new Set((m.chunks||[]).filter(c=>c.status==="uploaded").map(c=>c.chunk_index));
+  let completed=done.size,failed=[];
+  card.bar.style.width=(completed/Math.max(1,m.total_chunks)*100)+"%";
+  const todo=Array.from({length:m.total_chunks},(_,i)=>i).filter(i=>!done.has(i));
+  let cursor=0;
+  async function worker(){
+   while(cursor<todo.length){
+    const i=todo[cursor++];
+    try{
+     const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));
+     await api("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob});
+     completed++;card.bar.style.width=(completed/Math.max(1,m.total_chunks)*100)+"%";
+     card.state.textContent="Uploaded "+completed+"/"+m.total_chunks+" chunks · 3-way parallel";
+    }catch(e){failed.push(i);card.state.textContent="Chunk "+(i+1)+" failed: "+e.message}
+   }
+  }
+  await Promise.all(Array.from({length:Math.min(3,todo.length)},worker));
+  if(failed.length){card.state.innerHTML='<span class="bad">'+failed.length+' chunks need retry. Select the same file again to resume.</span>'}
+  else{card.state.innerHTML='<span class="good">Complete</span>';toast((m.resumed?"Resumed ":"Uploaded ")+file.name)}
+ }catch(e){card.state.innerHTML='<span class="bad">'+safe(e.message)+'</span>'}
+ finally{loadFiles()}
+}
 async function uploadFiles(files){if(!files.length)return;for(const f of files){const c=uploadCard(f);uploadOne(f,c)}}
 async function loadFiles(){if(loading)return;loading=true;$("#files").innerHTML='<div class="empty">Loading files…</div>';try{const p=new URLSearchParams({limit:"25",offset:String(page*25),q:query,status});const d=await api("/v1/files?"+p).then(r=>r.json());$("#count").textContent=d.total+" file"+(d.total===1?"":"s");$("#pageInfo").textContent=d.total?("Page "+(page+1)+" · "+d.total+" total"):"";$("#prev").disabled=page===0;$("#next").disabled=(page+1)*25>=d.total;if(!d.files.length){$("#files").innerHTML='<div class="empty">No files found.</div>';return}$("#files").innerHTML=d.files.map(f=>'<div class="file"><div><div class="filename">'+safe(f.filename)+'</div><div class="meta">'+fmt(f.size_bytes)+' · '+safe(f.created_at||"")+' · '+safe(f.id)+'</div><div class="status">'+safe(f.status)+' · '+f.total_chunks+' chunks</div></div><div class="actions"><button data-download="'+safe(f.id)+'" '+(f.status!=="complete"?"disabled":"")+'>Download</button></div></div>').join("");$("#files").querySelectorAll("[data-download]").forEach(b=>b.onclick=()=>downloadFile(b.dataset.download,b))}catch(e){$("#files").innerHTML='<div class="empty bad">'+safe(e.message)+'</div>'}finally{loading=false}}
 async function downloadFile(id,button){const old=button.textContent;button.disabled=true;button.textContent="Preparing…";try{const m=await api("/v1/files/"+id).then(r=>r.json());if(m.status!=="complete")throw Error("File is not complete");const parts=[];let size=0;for(let i=0;i<m.total_chunks;i++){button.textContent="Chunk "+(i+1)+"/"+m.total_chunks;const r=await api("/v1/files/"+id+"/chunks/"+i);const b=await r.arrayBuffer();const h=await digest(b);if(h!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);parts.push(b);size+=b.byteLength}const blob=new Blob(parts,{type:"application/octet-stream"});if(m.sha256&&await digest(await blob.arrayBuffer())!==m.sha256)throw Error("Whole-file integrity check failed");const a=document.createElement("a"),u=URL.createObjectURL(blob);a.href=u;a.download=m.filename;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);toast("Download ready")}catch(e){toast(e.message)}finally{button.disabled=false;button.textContent=old}}
