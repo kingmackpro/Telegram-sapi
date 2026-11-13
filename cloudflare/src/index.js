@@ -142,6 +142,19 @@ export default {
         if (stmts.length) await env.DB.batch(stmts);
         return json({ id, filename: body.filename, size: body.size, chunkSize: CHUNK_SIZE, totalChunks: total, status: total === 0 ? "complete" : "uploading", resumed: false, chunks: [] }, 201);
       }
+      const deletePrefix = "/v1/files/";
+      if (request.method === "DELETE" && url.pathname.startsWith(deletePrefix)) {
+        const deleteId = url.pathname.slice(deletePrefix.length);
+        if (!deleteId || deleteId.includes("/")) return json({ error: "Not found" }, 404);
+        const existing = await env.DB.prepare("SELECT id FROM files WHERE id=?").bind(deleteId).first();
+        if (!existing) return json({ error: "File not found" }, 404);
+        // Remove only D1 metadata. Telegram messages/documents are intentionally left untouched.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM chunks WHERE file_id=?").bind(deleteId),
+          env.DB.prepare("DELETE FROM files WHERE id=?").bind(deleteId)
+        ]);
+        return json({ id: deleteId, deleted: true, storage: "database_only", telegramDeleted: false });
+      }
       const finalizePrefix = "/v1/files/";
       const finalizeSuffix = "/complete";
       const finalizePath = url.pathname;
