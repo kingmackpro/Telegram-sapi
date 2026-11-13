@@ -66,6 +66,12 @@ async function ensureConfig(env) {
   }
 }
 export default {
+  async scheduled(controller, env, ctx) {
+    const expired = await env.DB.prepare("SELECT id FROM files WHERE status='uploading' AND expires_at IS NOT NULL AND expires_at<=datetime('now') LIMIT 100").all();
+    for (const row of expired.results) {
+      await env.DB.prepare("DELETE FROM files WHERE id=? AND status='uploading' AND expires_at<=datetime('now')").bind(row.id).run();
+    }
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
@@ -113,20 +119,28 @@ export default {
         const body = await request.json();
         if (!body || typeof body.filename !== "string" || body.filename.length < 1 || body.filename.length > 255 ||
             !Number.isSafeInteger(body.size) || body.size < 0 ||
-            (body.sha256 != null && !/^[a-f0-9]{64}$/i.test(body.sha256))) {
-          return json({ error: "Expected filename, non-negative integer size, and optional SHA-256" }, 400);
+            typeof body.fingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(body.fingerprint)) {
+          return json({ error: "Expected filename, non-negative integer size, and 64-character fingerprint" }, 400);
+        }
+        const existing = await env.DB.prepare("SELECT id FROM files WHERE fingerprint=? AND size_bytes=? AND status='uploading' AND expires_at>datetime('now') ORDER BY updated_at DESC LIMIT 1").bind(body.fingerprint, body.size).first();
+        if (existing) {
+          await env.DB.prepare("UPDATE files SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),expires_at=datetime('now','+24 hours') WHERE id=?").bind(existing.id).run();
+          await env.DB.prepare("UPDATE chunks SET status='pending',error=NULL WHERE file_id=? AND status IN ('uncertain','uploading')").bind(existing.id).run();
+          const old = await env.DB.prepare("SELECT id,filename,size_bytes,chunk_size,total_chunks,status FROM files WHERE id=?").bind(existing.id).first();
+          const chunks = await env.DB.prepare("SELECT chunk_index,status,sha256 FROM chunks WHERE file_id=? ORDER BY chunk_index").bind(existing.id).all();
+          return json({ ...old, resumed: true, chunks: chunks.results }, 200);
         }
         const id = fileId();
         const total = Math.ceil(body.size / CHUNK_SIZE);
-        await env.DB.prepare("INSERT INTO files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status) VALUES (?,?,?,?,?,?,?)")
-          .bind(id, body.filename, body.size, CHUNK_SIZE, total, body.sha256 || null, total === 0 ? "complete" : "uploading").run();
+        await env.DB.prepare("INSERT INTO files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status,fingerprint,expires_at) VALUES (?,?,?,?,?,?,?,?,datetime('now','+24 hours'))")
+          .bind(id, body.filename, body.size, CHUNK_SIZE, total, body.sha256 || null, total === 0 ? "complete" : "uploading", body.fingerprint).run();
         const stmts = [];
         for (let i = 0; i < total; i++) {
           const size = Math.min(CHUNK_SIZE, body.size - i * CHUNK_SIZE);
           stmts.push(env.DB.prepare("INSERT INTO chunks (file_id,chunk_index,size_bytes,status) VALUES (?,?,?,'pending')").bind(id, i, size));
         }
         if (stmts.length) await env.DB.batch(stmts);
-        return json({ id, filename: body.filename, size: body.size, chunkSize: CHUNK_SIZE, totalChunks: total, status: total === 0 ? "complete" : "uploading" }, 201);
+        return json({ id, filename: body.filename, size: body.size, chunkSize: CHUNK_SIZE, totalChunks: total, status: total === 0 ? "complete" : "uploading", resumed: false, chunks: [] }, 201);
       }
       const match = url.pathname.match(/^\/v1\/files\/([a-zA-Z0-9_-]+)(?:\/chunks\/(\d+))?$/);
       if (!match) return json({ error: "Not found" }, 404);
@@ -170,9 +184,10 @@ export default {
         }
         await env.DB.prepare("UPDATE chunks SET status='uploaded',telegram_message_id=?,telegram_file_id=?,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE file_id=? AND chunk_index=?")
           .bind(message.message_id, doc.file_id, id, index).run();
+        await env.DB.prepare("UPDATE files SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),expires_at=datetime('now','+24 hours') WHERE id=? AND status='uploading'").bind(id).run();
         const pending = await env.DB.prepare("SELECT COUNT(*) AS n FROM chunks WHERE file_id=? AND status!='uploaded'").bind(id).first();
         if (pending.n === 0) {
-          await env.DB.prepare("UPDATE files SET status='complete',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").bind(id).run();
+          await env.DB.prepare("UPDATE files SET status='complete',expires_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").bind(id).run();
         }
         return json({ id, index, status: "uploaded", size: bytes.byteLength, sha256: digest, telegramMessageId: message.message_id });
       }
