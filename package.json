@@ -1,0 +1,16 @@
+{
+  "name": "telegram-storage-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chunked file storage using Telegram Bot API and SQLite metadata",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "upload": "node src/index.js upload",
+    "download": "node src/index.js download",
+    "status": "node src/index.js status",
+    "recover": "node src/index.js recover"
+  },
+  "engines": { "node": ">=20.0.0" },
+  "dependencies": { "better-sqlite3": "^12.2.0" }
+}
