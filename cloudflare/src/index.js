@@ -19,14 +19,14 @@ async function tg(env, method, body) {
   const data = await response.json();
   if (!response.ok || !data.ok) {
     const error = new Error(data.description || `Telegram API HTTP ${response.status}`);
-    error.telegramRejected = true;
+    error.telegramRejected = response.status < 500;
     error.retryAfter = data.parameters?.retry_after;
     throw error;
   }
   return data.result;
 }
 async function getFile(env, telegramFileId) {
-  const result = await tg(env, "getFile", JSON.stringify({ file_id: telegramFileId }));
+  const result = await tg(env, "getFile", new URLSearchParams({ file_id: telegramFileId }));
   const response = await fetch(`${TELEGRAM_API}/file/bot${env.TELEGRAM_BOT_TOKEN}/${result.file_path}`);
   if (!response.ok) throw new Error(`Telegram file download HTTP ${response.status}`);
   return response;
@@ -81,7 +81,7 @@ export default {
       if (!chunk) return json({ error: "Chunk not found" }, 404);
       if (request.method === "PUT") {
         if (chunk.status === "uploaded") return json({ error: "Chunk already uploaded", sha256: chunk.sha256 }, 409);
-        if (chunk.status === "uncertain") return json({ error: "Chunk outcome is uncertain; reconcile before retrying" }, 409);
+        if (chunk.status === "uncertain" || chunk.status === "uploading") return json({ error: "Chunk outcome is uncertain; reconcile before retrying" }, 409);
         const bytes = await request.arrayBuffer();
         if (bytes.byteLength !== chunk.size_bytes) return json({ error: "Chunk size mismatch", expected: chunk.size_bytes, received: bytes.byteLength }, 400);
         const digest = await sha256(bytes);
