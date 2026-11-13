@@ -9,8 +9,13 @@
     "upload": "node src/index.js upload",
     "download": "node src/index.js download",
     "status": "node src/index.js status",
-    "recover": "node src/index.js recover"
+    "recover": "node src/index.js recover",
+    "cloudflare": "node cloudflare/client.js"
   },
-  "engines": { "node": ">=20.0.0" },
-  "dependencies": { "better-sqlite3": "^12.2.0" }
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0"
+  }
 }
