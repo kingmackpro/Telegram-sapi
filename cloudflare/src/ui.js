@@ -35,10 +35,12 @@ async function uploadOne(file,card){
   const fp=await fingerprint(file);
   const m=await api("/v1/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file.name,size:file.size,fingerprint:fp})}).then(r=>r.json());
   card.meta.textContent=fmt(file.size)+" · "+(m.resumed?"Resuming ":"")+m.id;
+  const totalChunks=m.total_chunks??m.totalChunks;
+  if(!Number.isSafeInteger(totalChunks)||totalChunks<0)throw Error("Server returned an invalid chunk count");
   const done=new Set((m.chunks||[]).filter(c=>c.status==="uploaded").map(c=>c.chunk_index));
   let completed=done.size,failed=[];
-  card.bar.style.width=(completed/Math.max(1,m.total_chunks)*100)+"%";
-  const todo=Array.from({length:m.total_chunks},(_,i)=>i).filter(i=>!done.has(i));
+  card.bar.style.width=(completed/Math.max(1,totalChunks)*100)+"%";
+  const todo=Array.from({length:totalChunks},(_,i)=>i).filter(i=>!done.has(i));
   let cursor=0;
   async function worker(){
    while(cursor<todo.length){
@@ -47,7 +49,7 @@ async function uploadOne(file,card){
      const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));
      await api("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob});
      completed++;card.bar.style.width=(completed/Math.max(1,m.total_chunks)*100)+"%";
-     card.state.textContent="Uploaded "+completed+"/"+m.total_chunks+" chunks · 3-way parallel";
+     card.state.textContent="Uploaded "+completed+"/"+totalChunks+" chunks · 3-way parallel";
     }catch(e){failed.push(i);card.state.textContent="Chunk "+(i+1)+" failed: "+e.message}
    }
   }
@@ -78,7 +80,7 @@ async function downloadFile(id,button){
     const hash=await digest(b);
     if(hash!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);
     parts[i]=b;completed++;
-    button.textContent="Downloaded "+completed+"/"+m.total_chunks+" chunks · 4-way parallel";
+    button.textContent="Downloaded "+completed+"/"+totalChunks+" chunks · 4-way parallel";
    }
   });
   await Promise.all(workers);
