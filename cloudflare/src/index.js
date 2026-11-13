@@ -3,8 +3,10 @@ const CHUNK_SIZE = 10 * 1024 * 1024;
 const COOKIE = "sapi_session";
 const TELEGRAM_API = "https://api.telegram.org";
 
-function json(data, status = 200) {
-  return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
+function json(data, status = 200, extraHeaders = {}) {
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
+  return Response.json(data, { status, headers });
 }
 function readCookie(request) {
   const parts = (request.headers.get("Cookie") || "").split(";");
