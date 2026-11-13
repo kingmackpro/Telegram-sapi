@@ -100,7 +100,7 @@ export default {
         const limit = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "25", 10) || 25));
         const offset = Math.min(1000000, Math.max(0, Number.parseInt(url.searchParams.get("offset") || "0", 10) || 0));
         const clauses = [], values = [];
-        if (q) { clauses.push("filename LIKE ? ESCAPE '\\\\' COLLATE NOCASE"); values.push("%" + q.replace(/[\\%_]/g, "\\      if (request.method === "POST" && url.pathname === "/v1/files") {") + "%"); }
+        if (q) { clauses.push("filename LIKE ? COLLATE NOCASE"); values.push("%" + q + "%"); }
         if (status) { clauses.push("status=?"); values.push(status); }
         const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
         const total = await env.DB.prepare("SELECT COUNT(*) AS total FROM files" + where).bind(...values).first();
