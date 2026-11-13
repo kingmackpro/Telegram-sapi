@@ -59,7 +59,32 @@ async function uploadOne(file,card){
 }
 async function uploadFiles(files){if(!files.length)return;for(const f of files){const c=uploadCard(f);uploadOne(f,c)}}
 async function loadFiles(){if(loading)return;loading=true;$("#files").innerHTML='<div class="empty">Loading files…</div>';try{const p=new URLSearchParams({limit:"25",offset:String(page*25),q:query,status});const d=await api("/v1/files?"+p).then(r=>r.json());$("#count").textContent=d.total+" file"+(d.total===1?"":"s");$("#pageInfo").textContent=d.total?("Page "+(page+1)+" · "+d.total+" total"):"";$("#prev").disabled=page===0;$("#next").disabled=(page+1)*25>=d.total;if(!d.files.length){$("#files").innerHTML='<div class="empty">No files found.</div>';return}$("#files").innerHTML=d.files.map(f=>'<div class="file"><div><div class="filename">'+safe(f.filename)+'</div><div class="meta">'+fmt(f.size_bytes)+' · '+safe(f.created_at||"")+' · '+safe(f.id)+'</div><div class="status">'+safe(f.status)+' · '+f.total_chunks+' chunks</div></div><div class="actions"><button data-download="'+safe(f.id)+'" '+(f.status!=="complete"?"disabled":"")+'>Download</button></div></div>').join("");$("#files").querySelectorAll("[data-download]").forEach(b=>b.onclick=()=>downloadFile(b.dataset.download,b))}catch(e){$("#files").innerHTML='<div class="empty bad">'+safe(e.message)+'</div>'}finally{loading=false}}
-async function downloadFile(id,button){const old=button.textContent;button.disabled=true;button.textContent="Preparing…";try{const m=await api("/v1/files/"+id).then(r=>r.json());if(m.status!=="complete")throw Error("File is not complete");const parts=[];let size=0;for(let i=0;i<m.total_chunks;i++){button.textContent="Chunk "+(i+1)+"/"+m.total_chunks;const r=await api("/v1/files/"+id+"/chunks/"+i);const b=await r.arrayBuffer();const h=await digest(b);if(h!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);parts.push(b);size+=b.byteLength}const blob=new Blob(parts,{type:"application/octet-stream"});if(m.sha256&&await digest(await blob.arrayBuffer())!==m.sha256)throw Error("Whole-file integrity check failed");const a=document.createElement("a"),u=URL.createObjectURL(blob);a.href=u;a.download=m.filename;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);toast("Download ready")}catch(e){toast(e.message)}finally{button.disabled=false;button.textContent=old}}
+async function downloadFile(id,button){
+ const old=button.textContent;button.disabled=true;button.textContent="Preparing…";
+ try{
+  const m=await api("/v1/files/"+id).then(r=>r.json());
+  if(m.status!=="complete")throw Error("File is not complete");
+  const parts=new Array(m.total_chunks);let completed=0,cursor=0;
+  const workers=Array.from({length:Math.min(4,m.total_chunks)},async()=>{
+   while(cursor<m.total_chunks){
+    const i=cursor++;
+    const r=await api("/v1/files/"+id+"/chunks/"+i);
+    const b=await r.arrayBuffer();
+    const hash=await digest(b);
+    if(hash!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);
+    parts[i]=b;completed++;
+    button.textContent="Downloaded "+completed+"/"+m.total_chunks+" chunks · 4-way parallel";
+   }
+  });
+  await Promise.all(workers);
+  const blob=new Blob(parts,{type:"application/octet-stream"});
+  if(m.sha256&&await digest(await blob.arrayBuffer())!==m.sha256)throw Error("Whole-file integrity check failed");
+  const a=document.createElement("a"),u=URL.createObjectURL(blob);
+  a.href=u;a.download=m.filename;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);
+  toast("Download ready");
+ }catch(e){toast(e.message)}
+ finally{button.disabled=false;button.textContent=old}
+}
 $("#refresh").onclick=()=>loadFiles();$("#prev").onclick=()=>{page=Math.max(0,page-1);loadFiles()};$("#next").onclick=()=>{page++;loadFiles()};$("#search").oninput=()=>{query=$("#search").value.trim();page=0;clearTimeout(timer);timer=setTimeout(loadFiles,250)};$("#status").onchange=()=>{status=$("#status").value;page=0;loadFiles()};
 (async()=>{try{await api("/auth/me");showApp()}catch{showLogin()}})();
 </script></body></html>`;
