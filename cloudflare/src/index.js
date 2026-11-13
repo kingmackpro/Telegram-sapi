@@ -124,7 +124,7 @@ export default {
         }
         const recovered = await env.DB.prepare("SELECT id,filename,size_bytes,chunk_size,total_chunks,sha256,status,created_at,updated_at FROM recovery_files WHERE fingerprint=? AND size_bytes=? AND filename=? AND status='complete' ORDER BY archived_at DESC LIMIT 1").bind(body.fingerprint, body.size, body.filename).first();
         if (recovered) {
-          const recoveryChunks = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status='uploaded' AND telegram_file_id IS NOT NULL THEN 1 ELSE 0 END) AS uploaded FROM recovery_chunks WHERE file_id=?").bind(recovered.id).first();
+          const recoveryChunks = await env.DB.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='uploaded' AND telegram_file_id IS NOT NULL THEN 1 ELSE 0 END),0) AS uploaded FROM recovery_chunks WHERE file_id=?").bind(recovered.id).first();
           if (recoveryChunks.total === recovered.total_chunks && recoveryChunks.uploaded === recovered.total_chunks) {
             await env.DB.batch([
               env.DB.prepare("INSERT INTO files (id,filename,size_bytes,chunk_size,total_chunks,sha256,status,fingerprint,expires_at,created_at,updated_at) SELECT id,filename,size_bytes,chunk_size,total_chunks,sha256,'complete',fingerprint,NULL,created_at,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM recovery_files WHERE id=?").bind(recovered.id),
