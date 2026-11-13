@@ -34,7 +34,7 @@ async function uploadOne(file,card){
   card.state.textContent="Identifying file…";
   const fp=await fingerprint(file);
   const m=await api("/v1/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file.name,size:file.size,fingerprint:fp})}).then(r=>r.json());
-  card.meta.textContent=fmt(file.size)+" · "+(m.resumed?"Resuming ":"")+m.id;
+  card.meta.textContent=fmt(file.size)+" · "+(m.recovered?"Recovered instantly":m.resumed?"Resuming":"New upload")+" · "+m.id;
   const totalChunks=m.total_chunks??m.totalChunks;
   if(!Number.isSafeInteger(totalChunks)||totalChunks<0)throw Error("Server returned an invalid chunk count");
   const done=new Set((m.chunks||[]).filter(c=>c.status==="uploaded").map(c=>c.chunk_index));
@@ -59,7 +59,7 @@ async function uploadOne(file,card){
    card.state.textContent="Verifying upload…";
    const final=await api("/v1/files/"+m.id+"/complete",{method:"POST"}).then(r=>r.json());
    if(final.status!=="complete")throw Error("Server did not confirm upload completion");
-   card.state.innerHTML='<span class="good">Complete</span>';toast((m.resumed?"Resumed ":"Uploaded ")+file.name)
+   card.state.innerHTML='<span class="good">Complete</span>';toast((m.recovered?"Recovered instantly: ":m.resumed?"Resumed: ":"Uploaded: ")+file.name)
   }
  }catch(e){card.state.innerHTML='<span class="bad">'+safe(e.message)+'</span>'}
  finally{loadFiles()}
