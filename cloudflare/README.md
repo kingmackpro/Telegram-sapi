@@ -25,9 +25,22 @@ Alternatively, in Cloudflare Dashboard open **Workers & Pages → telegram-sapi 
 
 Do not commit secrets or paste them into source files.
 
+## Browser file manager
+
+Open the Worker URL in a browser. Sign in using the existing shared `API_TOKEN`; the Worker sets a seven-day Secure, HttpOnly, SameSite=Strict cookie. The token is not stored in browser JavaScript or local storage. The browser supports multi-file uploads, filename search, status filtering, and verified downloads. Uploads are sent in 10 MiB chunks. Browser downloads assemble the file in memory, so very large downloads may require substantial available memory.
+
+The browser login uses the same `API_TOKEN` as the CLI; no additional password or session secret is required. The cookie is a bearer credential, so sign out on shared devices.
+
 ## API
 
-All endpoints except `GET /health` require:
+The browser adds these routes:
+
+- `POST /auth/login` — JSON `{"password":"..."}`; sets the HttpOnly session cookie.
+- `GET /auth/me` — reports whether the current cookie or Bearer token is authenticated.
+- `POST /auth/logout` — clears the session cookie.
+- `GET /v1/files?q=term&status=complete&limit=25&offset=0` — D1-backed filename search and pagination. Telegram channel history is not searched.
+
+All endpoints except `GET /health` and `GET /` require:
 
 ```
 Authorization: Bearer <API_TOKEN>
