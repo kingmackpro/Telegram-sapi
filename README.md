@@ -162,7 +162,7 @@ Do not use this experimental project as the only copy of important data. Keep in
 
 ## Cloudflare Workers deployment
 
-A Cloudflare Workers adapter is available in [`cloudflare/`](./cloudflare/README.md), with a Wrangler configuration ready for Cloudflare Workers Builds and GitHub-based deployments. It uses Workers + D1 and stores chunk bytes in Telegram, without requiring a persistent local filesystem. The deployed API supports file manifests and per-chunk upload/download. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as encrypted Worker secrets before using file endpoints. See the Cloudflare guide for the API contract and recovery behavior.
+The Cloudflare implementation in [`cloudflare/`](./cloudflare/README.md) is a deployed chunked file-storage API built with Workers and D1. Telegram stores the chunk bytes; D1 stores file and chunk metadata. The browser UI and Node.js client use the API for chunked uploads and downloads, with SHA-256 verification. Incomplete uploads can be resumed while their 24-hour inactivity window remains active. Deleting a completed file archives its Telegram chunk references in D1, allowing an exact matching re-upload to restore the file metadata without uploading the bytes again. This recovery archive preserves references only; deletion does not remove the Telegram messages. Configure `API_TOKEN`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` as encrypted Worker secrets. See [the Cloudflare guide](./cloudflare/README.md) for setup and API details.
 
 ## Roadmap
 
