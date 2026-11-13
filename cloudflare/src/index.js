@@ -1,11 +1,38 @@
+import { HTML } from "./ui.js";
 const CHUNK_SIZE = 10 * 1024 * 1024;
+const COOKIE = "sapi_session";
 const TELEGRAM_API = "https://api.telegram.org";
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 }
+function readCookie(request) {
+  const parts = (request.headers.get("Cookie") || "").split(";");
+  for (const part of parts) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === COOKIE) return part.slice(i + 1).trim();
+  }
+  return "";
+}
+function sameSecret(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+function cookieHeader(token, age) {
+  return COOKIE + "=" + token + "; Path=/; Max-Age=" + age + "; HttpOnly; Secure; SameSite=Strict";
+}
+function originAllowed(request) {
+  const origin = request.headers.get("Origin");
+  return !origin || origin === new URL(request.url).origin;
+}
 function authorized(request, env) {
-  return Boolean(env.API_TOKEN) && request.headers.get("Authorization") === `Bearer ${env.API_TOKEN}`;
+  if (!env.API_TOKEN) return false;
+  const bearer = request.headers.get("Authorization") || "";
+  return sameSecret(bearer, "Bearer " + env.API_TOKEN) || sameSecret(readCookie(request), env.API_TOKEN);
 }
 function hex(bytes) {
   return [...new Uint8Array(bytes)].map(v => v.toString(16).padStart(2, "0")).join("");
@@ -40,11 +67,46 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, service: "telegram-sapi-worker", version: "0.2.0-cloudflare" });
+      return json({ ok: true, service: "telegram-sapi-worker", version: "0.3.0-web" });
+    }
+    if (request.method === "GET" && url.pathname === "/") {
+      return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" } });
+    }
+    if (request.method === "POST" && url.pathname === "/auth/login") {
+      if (!originAllowed(request)) return json({ error: "Invalid request origin" }, 403);
+      if (!env.API_TOKEN) return json({ error: "API_TOKEN is not configured" }, 503);
+      let body;
+      try { body = await request.json(); } catch { return json({ error: "Expected JSON body" }, 400); }
+      if (!sameSecret(body && body.password, env.API_TOKEN)) return json({ error: "Invalid password" }, 401);
+      return json({ ok: true }, 200, { "Set-Cookie": cookieHeader(env.API_TOKEN, 604800) });
+    }
+    if (request.method === "POST" && url.pathname === "/auth/logout") {
+      if (!originAllowed(request)) return json({ error: "Invalid request origin" }, 403);
+      return json({ ok: true }, 200, { "Set-Cookie": cookieHeader("", 0) });
+    }
+    if (request.method === "GET" && url.pathname === "/auth/me") {
+      return authorized(request, env) ? json({ authenticated: true }) : json({ error: "Unauthorized" }, 401);
     }
     if (!authorized(request, env)) return json({ error: "Unauthorized" }, 401);
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && readCookie(request) && !originAllowed(request)) {
+      return json({ error: "Invalid request origin" }, 403);
+    }
     try {
       await ensureConfig(env);
+      if (request.method === "GET" && url.pathname === "/v1/files") {
+        const q = (url.searchParams.get("q") || "").trim().slice(0, 120);
+        const rawStatus = url.searchParams.get("status") || "";
+        const status = ["complete", "uploading", "error"].includes(rawStatus) ? rawStatus : "";
+        const limit = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "25", 10) || 25));
+        const offset = Math.min(1000000, Math.max(0, Number.parseInt(url.searchParams.get("offset") || "0", 10) || 0));
+        const clauses = [], values = [];
+        if (q) { clauses.push("filename LIKE ? ESCAPE '\\\\' COLLATE NOCASE"); values.push("%" + q.replace(/[\\%_]/g, "\\      if (request.method === "POST" && url.pathname === "/v1/files") {") + "%"); }
+        if (status) { clauses.push("status=?"); values.push(status); }
+        const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
+        const total = await env.DB.prepare("SELECT COUNT(*) AS total FROM files" + where).bind(...values).first();
+        const files = await env.DB.prepare("SELECT id,filename,size_bytes,chunk_size,total_chunks,sha256,status,created_at,updated_at FROM files" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(...values, limit, offset).all();
+        return json({ files: files.results, total: total.total, limit, offset });
+      }
       if (request.method === "POST" && url.pathname === "/v1/files") {
         const body = await request.json();
         if (!body || typeof body.filename !== "string" || body.filename.length < 1 || body.filename.length > 255 ||
