@@ -128,11 +128,12 @@ async function downloadFile(id,button){
      ddetail.textContent="Receiving chunk "+(i+1)+"/"+totalChunks+" · "+fmt(chunkBytes)+" received";
      button.textContent="Downloading "+ddone.textContent;
     }
-    const b=new Uint8Array(chunkBytes);let offset=0;
-    for(const part of streamParts){b.set(part,offset);offset+=part.byteLength}
-    const hash=await digest(b.buffer);
-    if(hash!==m.chunks[i].sha256||b.byteLength!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);
-    parts[i]=b;completed++;
+    // Keep the received fragments as a Blob instead of copying the entire
+    // chunk into a second Uint8Array. Only allocate an ArrayBuffer for hashing.
+    const chunkBlob=new Blob(streamParts,{type:"application/octet-stream"});
+    const hash=await digest(await chunkBlob.arrayBuffer());
+    if(hash!==m.chunks[i].sha256||chunkBlob.size!==m.chunks[i].size_bytes)throw Error("Integrity check failed at chunk "+i);
+    parts[i]=chunkBlob;completed++;
     ddetail.textContent="Received and verified "+completed+"/"+totalChunks+" chunks";
    }
   });
