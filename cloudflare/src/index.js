@@ -244,11 +244,19 @@ export default {
       if (request.method === "GET") {
         if (chunk.status !== "uploaded" || !chunk.telegram_file_id) return json({ error: "Chunk is not available", status: chunk.status }, 409);
         const response = await getFile(env, chunk.telegram_file_id);
-        const bytes = await response.arrayBuffer();
-        if (bytes.byteLength !== chunk.size_bytes || await sha256(bytes) !== chunk.sha256) {
-          return json({ error: "Downloaded chunk failed integrity verification" }, 502);
+        // Stream Telegram's response straight through the Worker. Buffering the
+        // complete 10 MiB chunk here delays the first byte and hides live progress.
+        // The browser verifies the streamed chunk against this expected digest.
+        if (response.headers.get("Content-Length") && Number(response.headers.get("Content-Length")) !== chunk.size_bytes) {
+          return json({ error: "Telegram returned an unexpected chunk size" }, 502);
         }
-        return new Response(bytes, { headers: { "Content-Type": "application/octet-stream", "Content-Length": String(bytes.byteLength), "X-Chunk-SHA256": chunk.sha256, "Cache-Control": "no-store" } });
+        return new Response(response.body, { headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(chunk.size_bytes),
+          "X-Chunk-SHA256": chunk.sha256,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        } });
       }
       return json({ error: "Method not allowed" }, 405);
     } catch (error) {
