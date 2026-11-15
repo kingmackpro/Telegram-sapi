@@ -34,18 +34,29 @@ function liveTransferStats(samples,bytes,total,start){const now=performance.now(
 function safe(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function digest(buf){const h=await crypto.subtle.digest("SHA-256",buf);return [...new Uint8Array(h)].map(x=>x.toString(16).padStart(2,"0")).join("")}
 function uploadCard(file){const key="upload:"+file.name+"|"+file.size;let el=[...$("#uploads").querySelectorAll(".transfer-card")].find(x=>x.dataset.transferKey===key);if(!el){el=document.createElement("article");el.className="transfer-card";el.dataset.transferKey=key;$("#uploads").prepend(el)}el.innerHTML='<div class="transfer-top"><div class="transfer-name">'+safe(file.name)+'</div><div class="status">Queued</div></div><div class="meta">'+fmt(file.size)+' total</div><div class="progress"><i></i></div><div class="transfer-stats"><div class="stat"><strong data-speed>—</strong><span>Speed</span></div><div class="stat"><strong data-eta>—</strong><span>Time left</span></div><div class="stat"><strong data-done>0%</strong><span>Progress</span></div></div><div class="transfer-detail"><span class="meta" data-detail>Waiting to start</span><span class="meta" data-bytes>0 B / '+fmt(file.size)+'</span></div>';$("#uploads").prepend(el);return {el,bar:el.querySelector(".progress i"),meta:el.querySelector(".meta"),state:el.querySelector(".status"),speed:el.querySelector("[data-speed]"),eta:el.querySelector("[data-eta]"),done:el.querySelector("[data-done]"),detail:el.querySelector("[data-detail]"),bytes:el.querySelector("[data-bytes]")}}
-async function fingerprint(file){
- const hashes=[];
- for(let offset=0;offset<file.size;offset+=CHUNK){
-  const part=await file.slice(offset,Math.min(file.size,offset+CHUNK)).arrayBuffer();
-  hashes.push(await digest(part));
+async function fingerprint(file,onProgress){
+ const total=Math.ceil(file.size/CHUNK),hashes=new Array(total);
+ let cursor=0,completed=0;
+ async function worker(){
+  while(cursor<total){
+   const index=cursor++;
+   const start=index*CHUNK;
+   const part=await file.slice(start,Math.min(file.size,start+CHUNK)).arrayBuffer();
+   hashes[index]=await digest(part);
+   completed++;
+   if(onProgress)onProgress(completed,total);
+  }
  }
+ await Promise.all(Array.from({length:Math.min(3,total)},worker));
  return digest(new TextEncoder().encode(file.name+"|"+file.size+"|"+hashes.join("|")).buffer);
 }
 async function uploadOne(file,card){
  try{
-  card.state.textContent="Identifying file…";
-  const fp=await fingerprint(file);
+  const fingerprintChunks=Math.ceil(file.size/CHUNK);
+  card.state.textContent="Identifying file… "+(fingerprintChunks? "0/"+fingerprintChunks : "0/0");
+  const fp=await fingerprint(file,(completed,total)=>{
+   card.state.textContent="Identifying file… "+completed+"/"+total;
+  });
   const m=await api("/v1/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file.name,size:file.size,fingerprint:fp})}).then(r=>r.json());
   card.meta.textContent=fmt(file.size)+" · "+(m.recovered?"Recovered instantly":m.resumed?"Resuming":"New upload")+" · "+m.id;
   const totalChunks=m.total_chunks??m.totalChunks;
