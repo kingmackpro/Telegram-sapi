@@ -20,6 +20,27 @@ button,input,select{min-height:42px}button{transition:background .15s,border-col
 const $=s=>document.querySelector(s), CHUNK=10*1024*1024;let page=0,query="",status="",timer=null,loading=false;
 function toast(s){const t=$("#toast");t.textContent=s;t.classList.remove("hidden");clearTimeout(timer);timer=setTimeout(()=>t.classList.add("hidden"),3200)}
 async function api(path,opts={}){const r=await fetch(path,{...opts,credentials:"same-origin",headers:opts.headers||{}});if(r.status===401){showLogin();throw Error("Session expired. Sign in again.")}if(!r.ok){let d={};try{d=await r.json()}catch{}throw Error(d.error||("Request failed ("+r.status+")"))}return r}
+function xhrUpload(path,opts,onProgress){
+ return new Promise((resolve,reject)=>{
+  const xhr=new XMLHttpRequest();
+  xhr.open(opts.method||"PUT",path,true);
+  xhr.withCredentials=true;
+  for(const [name,value] of Object.entries(opts.headers||{}))xhr.setRequestHeader(name,value);
+  xhr.upload.onprogress=e=>{if(onProgress)onProgress(e.loaded,e.lengthComputable?e.total:null)};
+  xhr.onload=()=>{
+   if(xhr.status===401){showLogin();reject(Error("Session expired. Sign in again."));return}
+   if(xhr.status<200||xhr.status>=300){
+    let d={};try{d=JSON.parse(xhr.responseText||"{}")}catch{}
+    reject(Error(d.error||("Request failed ("+xhr.status+")")));return
+   }
+   resolve(xhr)
+  };
+  xhr.onerror=()=>reject(Error("Network error while uploading chunk"));
+  xhr.onabort=()=>reject(Error("Upload aborted"));
+  xhr.ontimeout=()=>reject(Error("Upload timed out"));
+  xhr.send(opts.body);
+ });
+}
 function showLogin(){$("#app").classList.add("hidden");$("#login").classList.remove("hidden")}
 function showApp(){$("#login").classList.add("hidden");$("#app").classList.remove("hidden");loadFiles()}
 $("#loginForm").addEventListener("submit",async e=>{e.preventDefault();$("#loginError").textContent="";const b=e.submitter;b.disabled=true;try{await api("/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:$("#password").value})});$("#password").value="";showApp()}catch(err){$("#loginError").textContent=err.message}finally{b.disabled=false}});
@@ -66,8 +87,23 @@ async function uploadOne(file,card){
   let completed=done.size,failed=[],sentBytes=0;
   const todo=Array.from({length:totalChunks},(_,i)=>i).filter(i=>!done.has(i));
   const transferStart=performance.now(),uploadTotal=todo.reduce((sum,i)=>sum+Math.min(CHUNK,file.size-i*CHUNK),0);
-  card.bar.style.width=(completed/Math.max(1,totalChunks)*100)+"%";
-  card.done.textContent=Math.round(completed/Math.max(1,totalChunks)*100)+"%";
+  const uploadSamples=[],inFlightBytes=new Map();
+  const alreadyUploadedBytes=[...done].reduce((sum,i)=>sum+Math.min(CHUNK,file.size-i*CHUNK),0);
+  function updateUploadProgress(){
+   const activeBytes=[...inFlightBytes.values()].reduce((sum,n)=>sum+n,0);
+   const liveBytes=sentBytes+activeBytes;
+   const stats=liveTransferStats(uploadSamples,liveBytes,uploadTotal,transferStart);
+   const fileBytes=Math.min(file.size,alreadyUploadedBytes+liveBytes);
+   card.bar.style.width=(fileBytes/Math.max(1,file.size)*100)+"%";
+   card.done.textContent=Math.round(fileBytes/Math.max(1,file.size)*100)+"%";
+   card.speed.textContent=fmtSpeed(stats.speed);card.eta.textContent=fmtTime(stats.eta);
+   card.bytes.textContent=fmt(liveBytes)+" / "+fmt(uploadTotal);
+   card.detail.textContent="Uploading "+completed+"/"+totalChunks+" chunks · 3 parallel";
+   card.state.textContent="Uploading";
+  }
+  card.bar.style.width=(alreadyUploadedBytes/Math.max(1,file.size)*100)+"%";
+  card.done.textContent=Math.round(alreadyUploadedBytes/Math.max(1,file.size)*100)+"%";
+  card.bytes.textContent="0 B / "+fmt(uploadTotal);
   card.detail.textContent="Preparing upload";
   let cursor=0;
   async function worker(){
@@ -75,15 +111,15 @@ async function uploadOne(file,card){
     const i=todo[cursor++];
     try{
      const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));
-     await api("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob});
-     completed++;sentBytes+=blob.size;card.bar.style.width=(completed/Math.max(1,totalChunks)*100)+"%";
-     const stats=transferStats(sentBytes,uploadTotal,transferStart);
-     card.speed.textContent=fmtSpeed(stats.speed);card.eta.textContent=fmtTime(stats.eta);
-     card.done.textContent=Math.round(completed/Math.max(1,totalChunks)*100)+"%";
-     card.bytes.textContent=fmt(sentBytes)+" / "+fmt(uploadTotal);
-     card.detail.textContent="Uploaded "+completed+"/"+totalChunks+" chunks · 3 parallel";
-     card.state.textContent="Uploading";
-    }catch(e){failed.push(i);card.state.textContent="Chunk "+(i+1)+" failed: "+e.message}
+     inFlightBytes.set(i,0);
+     updateUploadProgress();
+     await xhrUpload("/v1/files/"+m.id+"/chunks/"+i,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:blob},loaded=>{
+      inFlightBytes.set(i,Math.min(blob.size,loaded));
+      updateUploadProgress();
+     });
+     inFlightBytes.delete(i);completed++;sentBytes+=blob.size;
+     updateUploadProgress();
+    }catch(e){inFlightBytes.delete(i);failed.push(i);card.state.textContent="Chunk "+(i+1)+" failed: "+e.message;updateUploadProgress()}
    }
   }
   await Promise.all(Array.from({length:Math.min(3,todo.length)},worker));
@@ -154,7 +190,9 @@ async function downloadFile(id,button){
   const a=document.createElement("a"),u=URL.createObjectURL(blob);
   a.href=u;a.download=m.filename;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);
   dspeed.textContent=fmtSpeed(receivedBytes/Math.max(.25,(performance.now()-downloadStart)/1000));deta.textContent="Done";ddone.textContent="100%";dbar.style.width="100%";ddetail.textContent="Integrity verified · download ready";
+  card.querySelector(".status").innerHTML='<span class="good">Complete</span>';
   toast("Download ready");
+  setTimeout(()=>{if(card&&card.isConnected)card.remove()},5000);
  }catch(e){toast(e.message);if(card){const detail=card.querySelector("[data-detail]"),state=card.querySelector(".status");if(detail)detail.textContent="Download failed: "+e.message;if(state)state.innerHTML='<span class="bad">Failed</span>'}}
  finally{button.disabled=false;button.textContent=old}
 }
